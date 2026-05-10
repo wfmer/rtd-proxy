@@ -15,16 +15,16 @@ RTD's real-time data is published as [GTFS-Realtime](https://gtfs.org/realtime/)
 ### Example
 
 ```
-GET /predictions/11981
+GET /predictions/33727
 ```
 
 ```json
 {
-  "stop_id": "11981",
-  "stop_name": "Alameda Ave & S Downing St",
+  "stop_id": "33727",
+  "stop_name": "Union Station",
   "predictions": [
-    { "route": "3", "headsign": "3", "minutes": 4 },
-    { "route": "3", "headsign": "3", "minutes": 19 }
+    { "route": "L", "headsign": "L", "minutes": 3 },
+    { "route": "W", "headsign": "W", "minutes": 11 }
   ],
   "count": 2,
   "timestamp": 1778392868

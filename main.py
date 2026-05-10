@@ -173,7 +173,7 @@ def index():
     return jsonify({
         'service': 'RTD GTFS-RT Proxy for Tidbyt',
         'usage': 'GET /predictions/<stop_id>',
-        'example': '/predictions/11981',
+        'example': '/predictions/33727',
         'health': '/health',
         'data_source': 'RTD Denver GTFS-Realtime',
         'cache_ttl': rt_cache['ttl'],
