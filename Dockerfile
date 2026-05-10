@@ -1,13 +1,7 @@
-FROM golang:1.22-alpine AS build
+FROM python:3.12-slim
 WORKDIR /app
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o proxy .
-
-FROM alpine:3.19
-RUN apk --no-cache add ca-certificates
-WORKDIR /app
-COPY --from=build /app/proxy .
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY main.py .
 EXPOSE 8080
-CMD ["./proxy"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "main:app"]

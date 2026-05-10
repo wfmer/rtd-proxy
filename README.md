@@ -2,7 +2,7 @@
 
 A lightweight JSON proxy for RTD Denver's real-time transit feed, built for the [RTD Denver Tidbyt app](https://github.com/tidbyt/community/pull/3178).
 
-RTD's real-time data is published as [GTFS-Realtime](https://gtfs.org/realtime/) protobuf — a binary format that can't be parsed in Tidbyt's Starlark environment. This proxy fetches the protobuf feed, joins it with static GTFS schedule data for stop names and headsigns, and exposes a simple JSON API.
+RTD's real-time data is published as [GTFS-Realtime](https://gtfs.org/realtime/) protobuf — a binary format that can't be parsed in Tidbyt's Starlark environment. This proxy fetches the protobuf feed, joins it with static GTFS data for stop names, and exposes a simple JSON API.
 
 ## API
 
@@ -23,8 +23,8 @@ GET /predictions/11981
   "stop_id": "11981",
   "stop_name": "Alameda Ave & S Downing St",
   "predictions": [
-    { "route": "3", "headsign": "South Broadway", "minutes": 4 },
-    { "route": "3", "headsign": "South Broadway", "minutes": 19 }
+    { "route": "3", "headsign": "3", "minutes": 4 },
+    { "route": "3", "headsign": "3", "minutes": 19 }
   ],
   "count": 2,
   "timestamp": 1778392868
@@ -36,15 +36,13 @@ Find your stop ID at [rtd-denver.com](https://www.rtd-denver.com) or on the stop
 ## Data sources
 
 - **Real-time feed**: `https://open-data.rtd-denver.com/files/gtfs-rt/rtd/TripUpdate.pb` — cached 30s
-- **Static GTFS** (stop names + headsigns): `https://www.rtd-denver.com/files/gtfs/google_transit.zip` — cached 24h
+- **Static GTFS** (stop names): `https://www.rtd-denver.com/files/gtfs/google_transit.zip` — cached 24h
 
 ## Running locally
 
-Requires Go 1.22+.
-
 ```bash
-go mod tidy
-go run .
+pip install -r requirements.txt
+python main.py
 ```
 
 The server listens on `:8080` by default. Set `PORT` to override.
