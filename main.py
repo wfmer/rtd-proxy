@@ -3,6 +3,12 @@
 RTD GTFS-RT Proxy for Tidbyt
 Converts RTD's protobuf GTFS-RT feed to JSON for Tidbyt apps
 Designed for Google Cloud Run deployment
+
+Enriches realtime arrivals with static-GTFS data so the Tidbyt app can show
+real destinations and per-route brand colors:
+  - trip_id  -> trip_headsign   (trips.txt)   e.g. "Union Station"
+  - route_id -> route_short_name (routes.txt)  e.g. "L"
+  - route_id -> route_color / route_text_color (routes.txt)
 """
 
 from flask import Flask, jsonify
@@ -24,53 +30,89 @@ rt_cache = {
 }
 
 static_cache = {
-    'stops': None,       # dict: stop_id -> stop_name
+    'stops': None,       # dict: stop_id  -> stop_name
+    'trips': None,       # dict: trip_id  -> trip_headsign
+    'routes': None,      # dict: route_id -> {"short", "color", "text_color"}
     'timestamp': 0,
     'ttl': 86400,        # Static GTFS: refresh once per day
 }
 
 # ── RTD feed URLs ──────────────────────────────────────────────────────────────
 RTD_TRIP_UPDATE_URL  = "https://open-data.rtd-denver.com/files/gtfs-rt/rtd/TripUpdate.pb"
+# NOTE: this 308-redirects to /api/download?...; requests follows redirects by default.
 RTD_STATIC_GTFS_URL  = "https://www.rtd-denver.com/files/gtfs/google_transit.zip"
 
 
-def fetch_static_stops():
+def _norm_color(value):
+    """Normalize a GTFS color ('0076CE', no #) to '#0076CE'. Returns None if invalid."""
+    if not value:
+        return None
+    v = value.strip().lstrip('#')
+    if len(v) == 6 and all(c in '0123456789abcdefABCDEF' for c in v):
+        return '#' + v.upper()
+    return None
+
+
+def fetch_static_gtfs():
     """
-    Fetch stop names from RTD's static GTFS zip.
-    Returns a dict of {stop_id: stop_name}, cached for 24 hours.
+    Fetch stop names, trip headsigns, and route branding from RTD's static GTFS zip.
+    Reads only the three small files it needs (stops/trips/routes), never the
+    large stop_times.txt / shapes.txt. Cached for 24 hours.
+
+    Returns (stops, trips, routes):
+      stops:  {stop_id: stop_name}
+      trips:  {trip_id: trip_headsign}
+      routes: {route_id: {"short": str, "color": str|None, "text_color": str|None}}
     """
     current_time = time.time()
     if (static_cache['stops'] is not None and
             (current_time - static_cache['timestamp']) < static_cache['ttl']):
-        return static_cache['stops']
+        return static_cache['stops'], static_cache['trips'], static_cache['routes']
 
-    stops = {}
+    stops, trips, routes = {}, {}, {}
     try:
-        resp = requests.get(RTD_STATIC_GTFS_URL, timeout=20)
+        resp = requests.get(RTD_STATIC_GTFS_URL, timeout=30, allow_redirects=True)
         resp.raise_for_status()
 
         with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
             with zf.open('stops.txt') as f:
-                reader = csv.DictReader(io.TextIOWrapper(f, encoding='utf-8'))
-                for row in reader:
-                    stops[row['stop_id']] = row.get('stop_name', row['stop_id'])
+                for row in csv.DictReader(io.TextIOWrapper(f, encoding='utf-8')):
+                    stops[row['stop_id']] = row.get('stop_name') or row['stop_id']
+
+            with zf.open('trips.txt') as f:
+                for row in csv.DictReader(io.TextIOWrapper(f, encoding='utf-8')):
+                    headsign = (row.get('trip_headsign') or '').strip()
+                    if headsign:
+                        trips[row['trip_id']] = headsign
+
+            with zf.open('routes.txt') as f:
+                for row in csv.DictReader(io.TextIOWrapper(f, encoding='utf-8')):
+                    routes[row['route_id']] = {
+                        'short': (row.get('route_short_name') or '').strip(),
+                        'color': _norm_color(row.get('route_color')),
+                        'text_color': _norm_color(row.get('route_text_color')),
+                    }
 
         static_cache['stops'] = stops
+        static_cache['trips'] = trips
+        static_cache['routes'] = routes
         static_cache['timestamp'] = current_time
-        print(f"Loaded {len(stops)} stops from static GTFS")
+        print(f"Loaded static GTFS: {len(stops)} stops, {len(trips)} trips, {len(routes)} routes")
     except Exception as e:
         print(f"Error fetching static GTFS: {e}")
-        # Fall back to whatever we had (could be None)
-        if static_cache['stops']:
-            stops = static_cache['stops']
+        # Fall back to whatever we had cached (could be None dicts on cold start)
+        if static_cache['stops'] is not None:
+            return static_cache['stops'], static_cache['trips'], static_cache['routes']
 
-    return stops
+    return stops, trips, routes
 
 
 def fetch_gtfs_rt_data():
     """
     Fetch and parse GTFS-RT protobuf data from RTD.
-    Returns a dict of {stop_id: [predictions]}.
+    Returns a dict of {stop_id: [raw predictions]} where each raw prediction is
+    {route_id, trip_id, minutes, arrival_time}. Enrichment (headsign, colors)
+    happens at request time so the 30 s RT cache stays independent of static GTFS.
     """
     current_time = time.time()
 
@@ -90,8 +132,7 @@ def fetch_gtfs_rt_data():
             if entity.HasField('trip_update'):
                 trip_update = entity.trip_update
                 route_id = trip_update.trip.route_id
-                # trip_headsign is not in GTFS-RT trip updates; use route_id as label
-                headsign = route_id
+                trip_id = trip_update.trip.trip_id
 
                 for stop_time_update in trip_update.stop_time_update:
                     stop_id = stop_time_update.stop_id
@@ -101,12 +142,9 @@ def fetch_gtfs_rt_data():
                         minutes = int((arrival_time - current_time) / 60)
 
                         if minutes >= 0:
-                            if stop_id not in predictions_by_stop:
-                                predictions_by_stop[stop_id] = []
-
-                            predictions_by_stop[stop_id].append({
-                                'route': route_id,
-                                'headsign': headsign,
+                            predictions_by_stop.setdefault(stop_id, []).append({
+                                'route_id': route_id,
+                                'trip_id': trip_id,
                                 'minutes': minutes,
                                 'arrival_time': arrival_time,
                             })
@@ -125,20 +163,34 @@ def fetch_gtfs_rt_data():
         return rt_cache['data'] if rt_cache['data'] else {}
 
 
+def _enrich(raw, trips, routes):
+    """Turn a raw RT prediction into the JSON shape the Tidbyt app consumes."""
+    route_id = raw['route_id']
+    route_meta = routes.get(route_id, {})
+
+    # Badge label: prefer the human route short name ("L", "15"); fall back to id.
+    label = route_meta.get('short') or route_id
+    # Destination: real headsign from the static trip; fall back to the route label.
+    headsign = trips.get(raw['trip_id']) or label
+
+    return {
+        'route': label,
+        'headsign': headsign,
+        'minutes': raw['minutes'],
+        'color': route_meta.get('color'),            # e.g. "#0076CE" or None
+        'text_color': route_meta.get('text_color'),  # e.g. "#FFFFFF" or None
+    }
+
+
 @app.route('/predictions/<stop_id>')
 def get_predictions(stop_id):
     """Get predictions for a specific stop, including the stop's human-readable name."""
     try:
         all_predictions = fetch_gtfs_rt_data()
-        stops = fetch_static_stops()
+        stops, trips, routes = fetch_static_gtfs()
 
-        stop_predictions = all_predictions.get(stop_id, [])
-
-        # Clean up: strip arrival_time (internal only) from response
-        clean_predictions = [
-            {k: v for k, v in p.items() if k != 'arrival_time'}
-            for p in stop_predictions[:10]
-        ]
+        raw = all_predictions.get(stop_id, [])[:10]
+        clean_predictions = [_enrich(p, trips, routes) for p in raw]
 
         stop_name = stops.get(stop_id, "")
 
